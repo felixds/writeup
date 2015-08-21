@@ -1,0 +1,187 @@
+---
+title: "WriteUp"
+author: "FAFA"
+date: "August of 2015"
+output:
+  html_document:
+    keep_md: yes
+---
+## Executive Summary
+The goal of these project is to predict the manner in which some people do 
+exercise and How Well it was done. The data set contains the "classe" 
+feature with a clasification from A to E indicating the kind of exercices
+(Sitting, Standing, Walking,...). 
+in the next section we're going to clean, pre-processing, train and plot all
+steps done to understand the process of prediction.
+
+
+```{r, echo=FALSE, eval=TRUE} 
+library(ggplot2) 
+library(grid)
+library(kernlab)
+library(AppliedPredictiveModeling)
+library(caret)
+library(splines)
+library(ParallelForest)
+library(doParallel)
+library(gbm)
+library(survival)
+library(plyr)
+library(kknn)
+library(randomForest)
+
+setwd("/Users/felixangelfernandezalonso/datasciencecoursera/MachineLear/projectwrite") 
+```
+
+
+
+## Cleaning And Analysis step.
+loading files and preparing dataset for machine learning model doing some
+cleaning for missing values and also reducing bad predictors.
+
+```{r, echo=TRUE} 
+# i'm loading dataset of training and split in both trainiing and test data set
+# after finishing i,m going to change missing values like DIV0 or Blank with 
+# NA value., so I'll use later to drop an entery column.
+
+filetra <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(filetra, destfile = "./pml-training.csv", method = "curl")
+training <- read.csv("./pml-training.csv", head=TRUE,sep=",", na.strings=c("", "#DIV/0!","NA"))
+
+# split training data set in training and testing data set
+training2 <- createDataPartition(y = training$classe, p = 0.7, list = FALSE)
+tra <- training[training2, ]
+tes <- training[-training2, ]
+
+# I eliminate the columns with NA values but with just only those more than 95% 
+# of total of NA's for training and testing datasets, also eliminate 
+# the first 7 columns which contains non usefull feature like name, new_windows
+# X, and so on.
+tra <- subset(tra, select = c(!(colSums(is.na(tra))*100)/(length(tra$X)) > 95))
+tes <- subset(tes, select = c(!(colSums(is.na(tes))*100)/(length(tes$X)) > 95))
+tra <- tra[,-c(1:7)]
+tes <- tes[,-c(1:7)]
+
+# I'm going to review if the new clean dataset contains features with values
+# near zero so i can eliminate from the dataset before continuing pre processing 
+# the dataset. 
+
+nsv <- nearZeroVar(tra,saveMetrics=TRUE)
+
+# Table 1 for low variability features, so as you see there isn't any feature
+# to eliminate for these reason. FALSE value for both zeroVar and nzv feature
+print(nsv, type = "html")  
+
+# In the nest step i'll find the correlated feature to combine them and 
+# reduce complexity from training dataset. below you'll see the feature that
+# are high correlated each other, and as there is some of them highly correlated
+# i'll use the option "pca" when train model to combine them automatically.
+
+M <- abs(cor(tra[,-53]))
+diag(M) <-0
+xt<-which(M >0.8, arr.ind=T)
+
+# Table 2 for High correlated variables*
+print(xt, type = "html")  
+
+```
+
+## Train models and combining predictions
+I'll train differents models using cross validation k-fold approach,
+and principal component analysis to reduce highly correlated variables. 
+the goal is analyze what's the best method to predict the outcome (classe)
+accurately and also combine it.
+
+
+```{r, echo=TRUE} 
+# I'll use the option to paralelize in several cpu cores when we train the model
+# so i can impreove performance, also i'll configure the settings to do 
+# cross validation when train model with K-fold approach and 10 folders. Using
+# K-fold as a cross validaton improve the accuracy.
+
+registerDoParallel(cores=3)
+# cross validation with k-folds settings
+set.seed(600)
+traincon <- trainControl(method="cv", number=10)
+
+# train several models with training data set using different classifiers
+# methods like knn or rf or kknn. below you'll find the function executed.
+
+modelfitknn <- train(classe~.,data=tra,trControl=traincon,preProcess="pca", method="knn")
+modelfitgbm <- train(classe~.,data=tra,trControl=traincon,preProcess="pca", method="gbm")
+modelfitkknn <- train(classe~.,data=tra,trControl=traincon,preProcess="pca", method="kknn")
+modelfitparRF <- train(classe~.,data=tra,trControl=traincon,preProcess="pca", method="parRF")
+modelfitrf <- train(classe~.,data=tra,trControl=traincon,preProcess="pca", method="rf")
+
+# As i have chosen several methods and train several models i'll try to use a 
+# good combination of the different models, below you'll find the combination of
+# the different predictions against testing data set to decide later 
+# which one i'll use it
+
+modknn<-predict(modelfitknn,tes)
+modgbm<-predict(modelfitgbm,tes)
+modkknn<-predict(modelfitkknn,tes)
+modparRF<-predict(modelfitparRF,tes)
+modrf<-predict(modelfitrf,tes)
+
+# combine models knn&gbm with rf
+predf<-data.frame(modknn,modgbm,classe=tes$classe)
+combmod<-train(classe~.,method="rf",data=predf)
+
+# combine models kknn$parRF with rf
+predf1<-data.frame(modkknn,modparRF,classe=tes$classe)
+combmod1<-train(classe~.,method="rf",data=predf1)
+```
+
+
+## Choosing the best model to predict.
+I'll analyze the differents models and also plot the accuracy metrics to determine 
+why a model is better than other and why, also I'll choose the best one based on
+accuracy.
+
+```{r, echo=TRUE} 
+
+# here i,m resampling the diffrent models to analyze the accuracy and Kappa
+# values for all of them together.
+resultsnormal <- resamples(list(modelgbm=modelfitgbm, modelkknn=modelfitkknn,
+                          modelknn=modelfitknn, modelparRF=modelfitparRF,
+                          modelrf=modelfitrf))
+resultscomb <- resamples(list(modelgbm_knn=combmod, modelparRF_kknn=combmod1))
+
+# As you'll see below the best model is the model trained with method
+# Kknn, other good one are parRF and Random Forest too.
+bwplot(resultsnormal)
+
+# Finally as we haven't find any with value 1 (perfect prediction) we will 
+# combine from lower predection to higher prediction together, that's means we'll 
+# use gbm and knn method together and also parRF and Kknn as well, both groups 
+# trained with random forest (rf). the results is clear the parRF-kknn with random
+# forest is the best model to predict
+bwplot(resultscomb)
+
+# Below you'll find the confustionMatrix with Accuracy for the best model chosen
+# and confident interval, P-Value, Specificity and Sensitivity
+confusionMatrix(tes$classe, predict(combmod1,tes))
+
+# you'll find the final model below with the samples, predictors and the 5 classes
+# also you'll see the final accuracy with the out of error rate.
+combmod1$finalModel
+
+```
+
+## Cross Validation (Out of sample error).
+you'll find below the out of sample error after finishing train model and choose
+the best prediction.
+
+```{r, echo=TRUE} 
+# predict on test data set with the best model trained
+finalpred <- predict(combmod1, tes)
+# True Accuracy of prediction model and percentage
+OoSerror <- sum(finalpred == tes$classe)/length(finalpred)
+OoSerrorfinal <- 1-OoSerror
+p <-OoSerrorfinal*100
+paste0("Out of sample error: ", round(p, digits = 2), "%")
+```
+
+
+
